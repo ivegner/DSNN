@@ -7,7 +7,6 @@ from functools import reduce
 
 tf.enable_eager_execution()
 
-ACTIVATION_HISTORY_LEN = 10
 LEARNING_RATE = 0.1
 # THRESHOLD_VALUE = 0.1
 N_DEACTIVATION_STEPS = 2
@@ -140,7 +139,7 @@ class DSNN:
                     print("LOSS", loss)
                     aggregate_loss += loss
                 de_dm = tape.gradient(loss, self.multipliers_net)
-                # de_dm = tf.clip_by_global_norm([de_dm], 5.0)[0][0]
+                de_dm = tf.clip_by_global_norm([de_dm], 5.0)[0][0]
                 print("GRADIENT", de_dm, sep="\n")
                 self.optimizer.apply_gradients([(de_dm, self.multipliers_net)])
                 # self.multipliers_net.assign_sub(LEARNING_RATE * de_dm)
@@ -152,7 +151,6 @@ class DSNN:
     #     """
     #     # self.activations_net.assign(tf.zeros_like(self.multipliers_net))
     #     self.activations_net = tf.zeros_like(self.multipliers_net)
-    #     # self.activation_history = deque([], ACTIVATION_HISTORY_LEN)
 
     def _build_filter(self, dims, elem=None):
         if elem is None:
@@ -170,7 +168,7 @@ class DSNN:
         print("\n")
 
 
-net = DSNN((3,3), 1, 1)
+net = DSNN((3, 3), 1, 1)
 print("NET SHAPE", net.activations_net.shape)
 print("FILTER SHAPE", net.filter.shape)
 
@@ -182,12 +180,12 @@ net.train(inputs, targets, epochs=5)
 
 print("----\n\n")
 out = net.step([0.60]).numpy()
-while (out == 0):
+while out == 0:
     out = net.step().numpy()
 print(out, " - expected - 1.3")
 
 
 out = net.step([0.25]).numpy()
-while (out == 0):
+while out == 0:
     out = net.step().numpy()
 print(out, " - expected - 0.6")
