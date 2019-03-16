@@ -6,13 +6,18 @@ Pending
 ## TODO:
 
 ### Algorithm
-- [ ] Weights between nodes
-
+- [x] Backprop training
+- [x] Gradient clipping
+- [x] Deactivation of neurons after firing
+- [ ] Weights between nodes (aka variable convolution filters)
 - [ ] Thresholding
+- [ ] Multiple input and output nodes (how to make sure the outputs all come in at the same time?)
 
-## Infrastructure
+### Infrastructure
 - [ ] CLI
-
 - [ ] train/test sets
-
 - [ ] tensorboard and/or additional visualization. No one wants to look at command line matrices.
+
+### Long-term
+- [ ] Vector-valued neurons
+- [ ] Try to process images with DSNN
