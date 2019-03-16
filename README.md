@@ -6,13 +6,13 @@ Pending
 ## TODO:
 
 ### Algorithm
-[ ] Weights between nodes
+- [ ] Weights between nodes
 
-[ ] Thresholding
+- [ ] Thresholding
 
 ## Infrastructure
-[ ] CLI
+- [ ] CLI
 
-[ ] train/test sets
+- [ ] train/test sets
 
-[ ] tensorboard and/or additional visualization. No one wants to look at command line matrices.
+- [ ] tensorboard and/or additional visualization. No one wants to look at command line matrices.
