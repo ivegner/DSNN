@@ -5,8 +5,14 @@ Pending
 
 ## TODO:
 
+### Algorithm
 [ ] Weights between nodes
 
 [ ] Thresholding
 
-[ ] Code infrastructure: CLI, train/test sets
+## Infrastructure
+[ ] CLI
+
+[ ] train/test sets
+
+[ ] tensorboard and/or additional visualization. No one wants to look at command line matrices.
