@@ -14,8 +14,10 @@ N_DEACTIVATION_STEPS = 2
 # shape = (width, height, depth)
 # n_in, n_out = number of inputs/outputs
 class DSNN:
-    def __init__(self, shape, n_in, n_out):
+    def __init__(self, shape, n_in, n_out, do_threshold=False):
         self.shape = [d for d in shape if d > 1]  # no empty dimensions
+        self.do_threshold = do_threshold
+
         self.n_dims = len(self.shape)
         self.multipliers_net = tf.get_variable(
             "multipliers", shape=(1, *self.shape, 1), initializer=tf.random_normal_initializer()
@@ -23,7 +25,13 @@ class DSNN:
         self.deactivation_masks = []
 
         self.activations_net = tf.zeros_like(self.multipliers_net)
-        self.optimizer = tf.train.GradientDescentOptimizer(LEARNING_RATE)
+        self.optimizer = tf.train.AdamOptimizer(LEARNING_RATE)
+
+        if self.do_threshold:
+            self.threshold = tf.Variable(tf.constant(0.5))  # will be adjusted via gradient descent
+            self.threshold_value = tf.Variable(
+                tf.constant(1.0)
+            )  # will be adjusted via gradient descent
 
         # first row for inputs, last row for outputs. TODO: input and output on different heights.
         self.input_indices = [(0, i, 0) + (0,) * (self.n_dims - 2) + (0,) for i in range(n_in)]
@@ -50,6 +58,25 @@ class DSNN:
             tf.reshape(self.filter, [*self.filter.shape, 1, 1]), dtype="float32"
         )
 
+    def _threshold_func(self, x, threshold, threshold_value=1.0, steepness=10.0):
+        """Thresholding function (sigmoid with coefficients)
+         Transforms activations into a standard range in a differentiable manner
+
+        Args:
+            x (Tensor): The tensor/array to threshold
+            threshold (float): Threshold, before which x~0 and after which, x~threshold_value
+            threshold_value (float, optional): Defaults to 1.0. The maximum value of
+                the threshold
+            steepness (float, optional): Defaults to 10.0. The steepness of the intermediate
+                part of the threshold function, between 0 and threshold_value
+
+        Returns:
+            Tensor: tensor of the same shape, thresholded to the provided parameters
+        """
+        active_mask = tf.abs(1.0 - self._get_zero_mask(x))  # invert
+        t = threshold_value / (1.0 + tf.exp(-steepness * (x - threshold - 1.0 / np.e)))
+        return t * active_mask  # set the zeroes back to 0, to avoid noisy fake activations
+
     def step(self, inputs=None):
         if inputs:
             # put new inputs into the input neurons
@@ -69,10 +96,7 @@ class DSNN:
 
         # build a boolean mask of the neurons active in the last 2 timesteps.
         # They will be deactivated at the end of the step
-        active_mask = tf.where(tf.not_equal(_active_net, tf.constant(0.0, dtype="float32")))
-        active_mask = tf.sparse_tensor_to_dense(
-            tf.SparseTensor(active_mask, tf.zeros((len(active_mask),)), _active_net.shape), 1.0
-        )
+        active_mask = self._get_zero_mask(_active_net)
         self.deactivation_masks.append(active_mask)
         if len(self.deactivation_masks) > N_DEACTIVATION_STEPS:
             self.deactivation_masks.pop(0)
@@ -80,16 +104,46 @@ class DSNN:
         # this is equivalent to a convolution with a cross-shaped additive filter
         _active_net = tf.nn.convolution(_active_net, self.filter, "SAME")
 
-        # apply activation/threshold function
-        # _active_net = tf.nn.relu(_active_net)
+        if self.do_threshold:
+            # apply activation/threshold function
+            print(
+                "THRESHOLD: ",
+                self.threshold.numpy(),
+                " THRESHOLD VALUE: ",
+                self.threshold_value.numpy(),
+            )
+            if self.threshold > self.threshold_value:
+                raise Exception("Well... fuck.")
+
+            self.print_net("BEFORE THRESHOLD", _active_net)
+            _active_net = self._threshold_func(
+                _active_net, self.threshold, threshold_value=self.threshold_value
+            )
+            self.print_net("AFTER THRESHOLD", _active_net)
+
         # multiply by the multipliers to get the final activations
-        _active_net = _active_net * self.multipliers_net
+        _active_net = _active_net * self.multipliers_net  # * self.threshold
 
         total_mask = reduce(lambda x, y: tf.multiply(x, y), self.deactivation_masks)
         self.activations_net = total_mask * _active_net
         print("---\nEnd of step:")
         self.print_net("Activations", _active_net)
         return tf.gather_nd(_active_net, self.output_indices)
+
+    def _get_zero_mask(self, tensor):
+        """Return a boolean mask where 1 is a 0 in the tensor.
+
+        Args:
+            tensor: Input tensor
+
+        Returns:
+            Tensor: Boolean mask of the zeroes in the tensor
+        """
+        active_mask = tf.where(tf.not_equal(tensor, tf.constant(0.0, dtype="float32")))
+        active_mask = tf.sparse_tensor_to_dense(
+            tf.SparseTensor(active_mask, tf.zeros((len(active_mask),)), tensor.shape), 1.0
+        )
+        return active_mask
 
     def train(self, inputs, targets, epochs=10, step_to_nonzero=True):
         """Train the D-SNN on inputs and targets
@@ -127,11 +181,11 @@ class DSNN:
 
                 # enter auto-grad context
                 x = tf.constant(x, dtype="float32")
-                with tf.GradientTape() as tape:
+                with tf.GradientTape(persistent=True) as tape:
                     tape.watch(x)
                     out = self.step(x)
                     if step_to_nonzero:
-                        while out.numpy() == 0:
+                        while np.isclose(out.numpy(), np.zeros_like(out), rtol=0.1):
                             out = self.step()
                     # self.reset_activations()
                     print("FINAL OUT", out)
@@ -139,9 +193,24 @@ class DSNN:
                     print("LOSS", loss)
                     aggregate_loss += loss
                 de_dm = tape.gradient(loss, self.multipliers_net)
-                de_dm = tf.clip_by_global_norm([de_dm], 5.0)[0][0]
-                print("GRADIENT", de_dm, sep="\n")
-                self.optimizer.apply_gradients([(de_dm, self.multipliers_net)])
+                if self.do_threshold:
+                    de_dt = tape.gradient(loss, self.threshold)
+                    de_dtv = tape.gradient(loss, self.threshold_value)
+                    print("THRESHOLD GRADIENT", de_dt.numpy(), "VALUE GRADIENT", de_dtv.numpy())
+                self.print_net("GRADIENT", de_dm.numpy())
+
+                capped_gvs = [
+                    (tf.clip_by_value(grad, -1.0, 1.0), var)
+                    for grad, var in [(de_dm, self.multipliers_net)]
+                    + (
+                        [(de_dt, self.threshold), (de_dtv, self.threshold_value)]
+                        if self.do_threshold
+                        else []
+                    )
+                ]
+
+                self.optimizer.apply_gradients(capped_gvs)
+                del tape
                 # self.multipliers_net.assign_sub(LEARNING_RATE * de_dm)
             print("Epoch {} over - loss: {}".format(epoch, aggregate_loss))
 
@@ -175,17 +244,18 @@ print("FILTER SHAPE", net.filter.shape)
 inputs = [[0.1], [0.2], [0.3], [0.4]]
 targets = [[0.3], [0.5], [0.7], [0.9]]
 
-net.train(inputs, targets, epochs=5)
+net.train(inputs, targets, epochs=10)
 
 
 print("----\n\n")
-out = net.step([0.60]).numpy()
-while out == 0:
-    out = net.step().numpy()
-print(out, " - expected - 1.3")
+out1 = net.step([0.05]).numpy()
+while out1 == 0:
+    out1 = net.step().numpy()
 
 
-out = net.step([0.25]).numpy()
-while out == 0:
-    out = net.step().numpy()
-print(out, " - expected - 0.6")
+out2 = net.step([0.25]).numpy()
+while out2 == 0:
+    out2 = net.step().numpy()
+
+print(out1, " - expected - 0.2")
+print(out2, " - expected - 0.6")
