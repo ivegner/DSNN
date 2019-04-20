@@ -10,7 +10,8 @@ Pending
 - [x] Gradient clipping
 - [x] Deactivation of neurons after firing
 - [ ] Weights between nodes (aka variable convolution filters)
-- [ ] Thresholding
+- [ ] Vector-valued neurons
+- [x] Thresholding
 - [ ] Multiple input and output nodes (how to make sure the outputs all come in at the same time?)
 
 ### Infrastructure
@@ -19,5 +20,4 @@ Pending
 - [ ] tensorboard and/or additional visualization. No one wants to look at command line matrices.
 
 ### Long-term
-- [ ] Vector-valued neurons
 - [ ] Try to process images with DSNN
