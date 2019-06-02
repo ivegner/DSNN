@@ -4,7 +4,7 @@ import tensorflow as tf
 
 DECAY_FACTOR = 0.8
 
-class SNNLayer(Layer):
+class SNNLayer(object):
     """Initialize a DSNN layer
 
     Args:
@@ -13,16 +13,15 @@ class SNNLayer(Layer):
         output_type ("series"|"stack"): "series" for one output vector per timestep,
             "stack" to output the entire activation matrix
     """
-
-    def __init__(self, shape, output_type="series", **kwargs):
-        # which neurons for input and output
+    def __init__(self, shape, output_type="series"):
         if len(shape) != 3:
             raise Exception("Shape must be (length, width, N) tuple")
         if output_type not in ("series", "stack"):
             raise Exception("Output type must be one of (series|stack)")
         self.shape = shape
         self.output_type = output_type
-        super(SNNLayer, self).__init__(**kwargs)
+        self.trainable_weights = []
+        self.built = False
 
     def build(self, input_shape):
         if len(input_shape) == 3:
@@ -33,7 +32,7 @@ class SNNLayer(Layer):
                 self.add_weight(
                     name="input_matrix",
                     shape=(self.shape[0], self.shape[1], input_shape[-1], self.shape[-1]),
-                    initializer="normal",
+                    initializer=tf.random_normal_initializer(),
                     trainable=True,
                 ),
             )
@@ -43,7 +42,7 @@ class SNNLayer(Layer):
             self.input_matrix = self.add_weight(  # simple 2D matrix, because input is a vector
                 name="input_matrix",
                 shape=(input_shape[0], self.shape[-1]),
-                initializer="normal",
+                initializer=tf.random_normal_initializer(),
                 trainable=True,
             )
         else:
@@ -62,7 +61,7 @@ class SNNLayer(Layer):
         #             self.add_weight(
         #                 name="weight({},{},{}".format(row, column, direction),
         #                 shape=(input_shape[-1], input_shape[-1]),
-        #                 initializer="normal",
+        #                 initializer=tf.random_normal_initializer(),
         #                 trainable=True,
         #             )
         #             for direction in range(4)
@@ -80,32 +79,47 @@ class SNNLayer(Layer):
                 self.add_weight(
                     name="layer_weights",
                     shape=(self.shape[0], self.shape[1], input_shape[-1], input_shape[-1]),
-                    initializer="normal",
+                    initializer=tf.random_normal_initializer(),
                     trainable=True,
                 ),
             )
             for direction in ("left", "right", "up", "down")
         )
+        self.built = True
 
-        super(SNNLayer, self).build(input_shape)  # Be sure to call this at the end
-
-    def call(self, x):
+    def __call__(self, x):
         """Perform a step of the DSNN
 
         Args:
             x (np.array/Tensor): Input for this timestep.
         """
-        if len(x.shape) == 1:
-            x = tf.expand_dims(x, 0)
-        _active = tf.matmul(x, self.input_matrix)
+        if x is not None:
+            if not self.built:
+                self.build(x.shape)
+            if len(x.shape) == 1:
+                x = tf.expand_dims(x, 0)
+            _active = tf.matmul(x, self.input_matrix)
 
-        if self.input_type == "series":
-            # x is actually a 1D vector, needs to be converted to a full activation
-            # matrix, while preserving the gradient
-            _active = self.activations + self._series_to_stack(x, self.shape)
+            if self.input_type == "series":
+                # TODO: series is actually a special case of stack, so make it an input matrix
+                # at layer initialization
 
+                # x is actually a 1D vector, needs to be converted to a full activation
+                # matrix, while preserving the gradient
+                stack = self._series_to_stack(x, self.shape)
+                stack = tf.expand_dims(stack, 2)
+                _active = self.activations + stack
+
+        else:
+            _active = self.activations
+
+        _OFFSET_DIRS = {
+            "up": [-1,0], "down": [1,0], "left": [0,-1], "right":[0,1]
+        }
         for direction, matrix in self.layer_weights.items():
-            self.activations += tf.matmul(_active, matrix)
+            direction_result = tf.matmul(_active, matrix)
+            direction_result # TODO: offset. So, e.g. for up, shift the matrix one row up
+            self.activations +=
 
         # TODO: decay
         self.activations *= DECAY_FACTOR
@@ -115,11 +129,11 @@ class SNNLayer(Layer):
         else:
             return self.activations
 
-    def compute_output_shape(self, input_shape):
-        if self.output_type == "stack":
-            return self.shape
-        else:
-            return self.shape[-1]  # dimensionality of the vector
+    # def compute_output_shape(self, input_shape):
+    #     if self.output_type == "stack":
+    #         return self.shape
+    #     else:
+    #         return self.shape[-1]  # dimensionality of the vector
 
     @staticmethod
     @tf.custom_gradient
@@ -128,7 +142,7 @@ class SNNLayer(Layer):
         assert len(x.shape) == 1
 
         def grad(dy):
-            print("DY IN SERIES_TO_STACK", dy, dy.shape)
+            # print("DY IN SERIES_TO_STACK", dy, dy.shape)
             return dy[0, 0]
 
         delta = (
@@ -140,8 +154,14 @@ class SNNLayer(Layer):
                 ),
                 0,
             ),
-        )
+        )[0]
         return delta, grad
+
+    def add_weight(self, *args, **kwargs):
+        weight = tf.get_variable(*args, **kwargs)
+        if weight.trainable:
+            self.trainable_weights.append(weight)
+        return weight
 
 
 """
