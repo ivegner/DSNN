@@ -76,11 +76,11 @@ def train(net, optimizer, criterion, clevr_dir, epoch):
         loss.backward()
 
         # if wrapped in a DataParallel, the actual net is at DataParallel.module
-        m = net.module if isinstance(net, nn.DataParallel) else net
-        torch.nn.utils.clip_grad_norm_(m.mac.read.parameters(), 1)
+        # m = net.module if isinstance(net, nn.DataParallel) else net
+        # torch.nn.utils.clip_grad_norm_(m.parameters(), 1)
         # torch.nn.utils.clip_grad_value_(net.parameters(), 0.05)
-
-        # if i % 1000 == 0:
+        # print("GRADS", dict(net.named_parameters())["module.grn.filter_gen.filter_gen_fc.0.weight"].grad)
+        # if i % 100 == 0:
         #     plot_grad_flow(net.named_parameters())
 
         optimizer.step()
@@ -190,6 +190,17 @@ def main(clevr_dir, n_neurons, hidden_dim=512, load_filename=None, n_epochs=20, 
     n_words = len(dic["word_dic"]) + 1
     n_answers = len(dic["answer_dic"])
 
+    net = GRNModel(
+        n_words,
+        n_neurons,
+        hidden_dim,
+        image_feature_dim=hidden_dim,
+        text_feature_dim=hidden_dim,
+        message_dim=hidden_dim,
+        edge_dim=5,
+    )
+    net = net.to(device)
+    print(net)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(net.parameters(), lr=1e-4)
     start_epoch = 0
@@ -214,7 +225,7 @@ def main(clevr_dir, n_neurons, hidden_dim=512, load_filename=None, n_epochs=20, 
             valid(net, clevr_dir, epoch)
 
             with open(
-                f"checkpoint/checkpoint_{str(epoch + 1).zfill(2)}_{n_neurons}m.model", "wb"
+                f"checkpoint/checkpoint_{str(epoch + 1).zfill(2)}_{n_neurons}m_{hidden_dim}h.model", "wb"
             ) as f:
 
                 torch.save(
@@ -229,7 +240,7 @@ def main(clevr_dir, n_neurons, hidden_dim=512, load_filename=None, n_epochs=20, 
                 )
     else:
         # predict on the test set and make visualization data
-        test(net, clevr_dir)
+        test(net, clevr_dir, batch_size=batch_size)
 
 
 if __name__ == "__main__":

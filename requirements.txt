@@ -6,3 +6,4 @@ h5py
 Pillow
 click
 matplotlib
+tb-nightly # until 1.14

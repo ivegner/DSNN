@@ -33,34 +33,36 @@ class ConvFilterGenerator(nn.Module):
 
         out_flat_dim = state_dim * message_dim if use_matrix_filters else state_dim
         # "smooth" interpolation of neurons
-        hidden_layer_units = np.linspace(start=edge_dim, stop=out_flat_dim, num=n_filter_nn_layers)
+        hidden_layer_units = np.linspace(
+            start=edge_dim, stop=out_flat_dim, num=n_filter_nn_layers + 2, dtype=int
+        ).tolist()
 
         # assemble layers
         layers = []
         for i, layer_units in enumerate(hidden_layer_units):
-            if i != len(layers):
+            if i < len(hidden_layer_units) - 1:
                 layers.append(linear(layer_units, hidden_layer_units[i + 1]))
                 layers.append(nn.SELU())
-        self.filter_gen_fc = nn.Sequential(layers)
+
+        self.filter_gen_fc = nn.Sequential(*layers)
 
     def forward(self, edge_matrix):
         """Forward pass of filter generator.
-        :param edge_matrix: edge matrix shaped [batch_size, n_neurons, n_neurons, edge_dim]
+        :param edge_matrix: edge matrix shaped [n_neurons, n_neurons, edge_dim]
         :return: generated message transformations. If self.use_matrix_filters is True, the shape is
-            [batch_size, n_neurons, n_neurons, state_dim, message_dim],
-            else we have a vector for each neuron pair: [batch_size, n_neurons, n_neurons, state_dim]
+            [n_neurons, n_neurons, state_dim, message_dim],
+            else we have a vector for each neuron pair: [n_neurons, n_neurons, state_dim]
         """
-        batch_size = edge_matrix.shape(0)
-
+        # NO BATCHING BECAUSE WE USE THE SAME MATRICES FOR EVERY SAMPLE IN THE ENTIRE BATCH
         edge_mat_flat = edge_matrix.view(-1, self.edge_dim)
         message_matrices = self.filter_gen_fc.forward(edge_mat_flat)
-        if use_matrix_filters:
+        if self.use_matrix_filters:
             message_matrices = message_matrices.view(
-                [batch_size, self.n_neurons, self.n_neurons, self.message_dim, state_dim]
+                [self.n_neurons, self.n_neurons, self.message_dim, self.state_dim]
             )
         else:
             message_matrices = message_matrices.view(
-                [batch_size, self.n_neurons, self.n_neurons, state_dim]
+                [self.n_neurons, self.n_neurons, self.state_dim]
             )
 
         return message_matrices
@@ -86,20 +88,20 @@ class MatrixMessagePassing(nn.Module):
             [batch_size, n_neurons, n_neurons, state_dim, state_dim]
         :return: sum of incoming messages to each neuron, shaped [batch_size, n_neurons, state_dim]
         """
-        batch_size = hidden_states.shape(0)
-        n_neurons = hidden_states.shape(1)
+        batch_size = hidden_states.shape[0]
+        n_neurons = hidden_states.shape[1]
 
         # multiply matrix with hidden states and add bias to generate messages
         hidden_states_flat = hidden_states.view([batch_size, n_neurons * self.state_dim, 1])
 
-        matrix_filters = matrix_filters.permute([0, 1, 3, 2, 4])
-        matrix_filters = matrix_filters.view(
-            [batch_size, n_neurons * self.message_dim, n_neurons * self.state_dim]
+        matrix_filters = matrix_filters.permute([0, 2, 1, 3])
+        matrix_filters = matrix_filters.contiguous().view(
+            [n_neurons * self.message_dim, n_neurons * self.state_dim]
         )
 
-        # (b, n*m_d, n*d) x (b, n*d, 1) -> (b, n*m_d, 1)
+        # (1, n*m_d, n*d) x (b, n*d, 1) -> (b, n*m_d, 1)
         messages = matrix_filters @ hidden_states_flat
-        messages = messages.view([batch_size, n_neurons, self.state_dim])
+        messages = messages.view([batch_size, n_neurons, self.message_dim])
         messages += self.message_bias
 
         return messages
@@ -153,19 +155,19 @@ class GRUUpdate(nn.Module):
         :param mask: indicates whether a neuron is actually present (1) or zero-padded (0). [batch_size, n_neurons]
         :return: updated states shaped [batch_size, n_neurons, state_dim]
         """
-        batch_size = hidden_states.shape(0)
-        n_neurons = hidden_states.shape(1)
+        batch_size = hidden_states.shape[0]
+        n_neurons = hidden_states.shape[1]
 
-        # reshape hidden states, messages and mask so that each row = one neuron
-        hidden_states = hidden_states.view([batch_size * n_neurons, self.state_dim])
-        messages = messages.view([batch_size * n_neurons, self.message_dim])
+        # reshape hidden states, messages and mask so that one batch = one neuron
+        hidden_states = hidden_states.view([1, batch_size * n_neurons, self.state_dim])
+        messages = messages.view([1, batch_size * n_neurons, self.message_dim])
         # mask = tf.cast(tf.reshape(mask, [batch_size * n_neurons, 1]), tf.float32)
 
-        updated_states = self.gru(messages, hidden_states)[0]
+        updated_states = self.gru(messages, hidden_states)[1]
         # # zero out masked nodes
         # updated_states = updated_states * mask
 
         # reshape back to original shape
-        updated_states = updated_states.view([batch_size, n_neurons, state_dim])
+        updated_states = updated_states.view([batch_size, n_neurons, self.state_dim])
 
         return updated_states

@@ -15,16 +15,7 @@ from modules import TextAttnModule, ImageAttnModule
 
 
 class GRN(nn.Module):
-    def __init__(
-        self,
-        n_neurons,
-        state_dim,
-        edge_dim=5,
-        message_dim=32,
-        max_step=12,
-        matrix_messages=True,
-        batch_size=64,
-    ):
+    def __init__(self, n_neurons, state_dim, edge_dim=32, message_dim=32, matrix_messages=True):
         super().__init__()
         self.filter_gen = ConvFilterGenerator(
             n_neurons, state_dim, edge_dim, message_dim=message_dim, use_matrix_filters=True
@@ -41,22 +32,62 @@ class GRN(nn.Module):
             xavier_uniform_(torch.empty((n_neurons, n_neurons, edge_dim)))
         )
 
-        self.hidden_states = torch.zeros((batch_size, n_neurons, n_neurons, state_dim))
-        self.max_step = max_step
+        self.initial_state = nn.Parameter(torch.zeros((n_neurons, state_dim)))
         self.n_neurons = n_neurons
         self.state_dim = state_dim
-        self.batch_size = batch_size
 
-    def forward(self, image, question):
-        """Forward pass of the message passing neural network."""
+        # set in init for each training example
+        self.n_outputs = None
+        self.hidden_states = None
+        self.filters = None
 
-        filters = self.filter_gen.forward(self.edge_matrix)
+    def init(self, batch_size, n_outputs):
+        # set initial hidden states
+        self.hidden_states = self.initial_state.repeat(batch_size, 1, 1)
+        # make edge filters
+        self.filters = self.filter_gen.forward(self.edge_matrix)
+        self.n_outputs = n_outputs
+
+        # just the start values as outputs
+        return self._get_outputs()
+
+    def _get_outputs(self):
+        # size of outputs: [batch_size, n_inputs, state_dim]
+        # output[:, i] = self.hidden_states[:, n_neurons -i],
+        # where i = index of corresponding input source
+        out_indices = self.n_neurons - 1 - torch.tensor(range(self.n_outputs))
+        outputs = self.hidden_states[:, out_indices, :].permute(1, 0, 2)
+        return outputs
+
+    def forward(self, inputs):
+        """Forward pass of the message passing neural network.
+
+            inputs: a `[batch_size, n_modules, state_dim]` tensor containing inputs to the network.
+                They will be put directly in the hidden state, with the same neuron receiving
+                the vector of the same index from inputs. So, neuron 0 will always receive
+                `inputs[:, 0, :]`
+
+        Returns: (outputs, hidden_states)
+
+            outputs: a `[batch_size, n_modules, state_dim]` tensor containing outputs for the
+            number of inputs passed in. So, `outputs[:,0,:]` will be the value of the neuron
+            corresponding to `inputs[:, 0, :]`. In fact, `outputs[:, i, :]` will come from
+            neuron `n_neurons - i`.
+
+            hidden_states: `[batch_size, n_neurons, state_dim]` the hidden states of the neurons
+        """
+        n_inputs = inputs.size(1)
+        input_indices = torch.tensor(range(n_inputs))
+
+        # put the inputs in their respective neurons
+        self.hidden_states[:, input_indices, :] = inputs[:, input_indices, :]
+
         # perform message passing
-        for i in range(self.max_step):
-            messages = self.message_passing.forward(self.hidden_states, filters)
-            hidden_states = self.update.forward(hidden_states, messages)
+        messages = self.message_passing.forward(self.hidden_states, self.filters)
+        self.hidden_states = self.update.forward(self.hidden_states, messages)
 
-        return output
+        # size of outputs: [n_outputs, batch_size, state_dim]
+        return self._get_outputs(), self.hidden_states
 
 
 class GRNModel(nn.Module):
@@ -71,40 +102,32 @@ class GRNModel(nn.Module):
         classes=28,
         image_feature_dim=512,
         text_feature_dim=512,
+        message_dim=128,
+        edge_dim=5
     ):
         super().__init__()
-
-        self.conv = nn.Sequential(
-            nn.Conv2d(1024, image_feature_dim, 3, padding=1),
-            nn.ELU(),
-            nn.Conv2d(image_feature_dim, image_feature_dim, 3, padding=1),
-            nn.ELU(),
-        )
-
-        self.embed = nn.Embedding(n_vocab, embed_hidden)
-        self.lstm = nn.LSTM(embed_hidden, text_feature_dim, batch_first=True, bidirectional=True)
-        self.lstm_proj = nn.Linear(text_feature_dim * 2, text_feature_dim)
 
         self.submodules = nn.ModuleDict(
             [
                 ("image_attn", ImageAttnModule(state_dim, image_feature_dim=image_feature_dim)),
-                ("text_attn", TextAttnModule(state_dim, text_feature_dim=text_feature_dim)),
+                (
+                    "text_attn",
+                    TextAttnModule(
+                        state_dim,
+                        n_vocab,
+                        embed_hidden=embed_hidden,
+                        text_feature_dim=text_feature_dim,
+                    ),
+                ),
             ]
         )
 
-        self.grn = GRN(
-            n_neurons,
-            state_dim,
-            edge_dim=5,
-            message_dim=32,
-            max_step=12,
-            matrix_messages=True,
-            batch_size=batch_size,
-        )
+        self.grn = GRN(n_neurons, state_dim, edge_dim=5, message_dim=message_dim, matrix_messages=True)
 
         self.classifier = nn.Sequential(
-            linear(state_dim, state_dim), nn.ELU(), linear(state_dim, classes)
+            linear(state_dim + text_feature_dim*2, state_dim), nn.ELU(), linear(state_dim, classes)
         )
+        kaiming_uniform_(self.classifier[0].weight)
 
         self.max_step = max_step
         self.state_dim = state_dim
@@ -113,37 +136,26 @@ class GRNModel(nn.Module):
         self.image_feature_dim = image_feature_dim
         self.text_feature_dim = text_feature_dim
 
-        self.reset()
-
-    def reset(self):
-        self.embed.weight.data.uniform_(0, 1)
-
-        kaiming_uniform_(self.conv[0].weight)
-        self.conv[0].bias.data.zero_()
-        kaiming_uniform_(self.conv[2].weight)
-        self.conv[2].bias.data.zero_()
-
-        kaiming_uniform_(self.classifier[0].weight)
-
     def forward(self, image, question, question_len, dropout=0.15):
         batch_size = question.size(0)
+        self.submodules["image_attn"].set_input(image)
+        self.submodules["text_attn"].set_input((question, question_len))
 
-        img = self.conv(image)
-        img = img.view(batch_size, self.image_feature_dim, -1)
-
-        embed = self.embed(question)
-        embed = nn.utils.rnn.pack_padded_sequence(embed, question_len, batch_first=True)
-        lstm_out, (h, _) = self.lstm(embed)
-        lstm_out, _ = nn.utils.rnn.pad_packed_sequence(lstm_out, batch_first=True)
-        lstm_out = self.lstm_proj(lstm_out)
-        h = h.permute(1, 0, 2).contiguous().view(batch_size, -1)
-
-        # Run GRN classifier
-        output = self.grn(lstm_out, h, img)
-        output = torch.cat(output, 1)
+        n_grn_outputs = len(self.submodules) + 1  # 1 for final output
+        # size = [n_outputs, batch_size, dim]
+        grn_outputs = self.grn.init(batch_size, n_grn_outputs)
+        grn_outputs, final_out = grn_outputs[:-1], grn_outputs[-1]
+        for step in range(self.max_step):
+            in_out = zip(self.submodules.values(), grn_outputs)
+            # outputs for each submodule = inputs to grn
+            submodule_outputs = torch.stack([m(x) for (m, x) in in_out], 0).permute(1,0,2)
+            # Run GRN
+            _grn_out, _ = self.grn(submodule_outputs)
+            grn_outputs, final_out = _grn_out[:-1], _grn_out[-1]
 
         # Read out output
-        out = torch.cat([output, h], 1)
+        hidden_state = self.submodules["text_attn"].input[1]
+        out = torch.cat([final_out, hidden_state], 1)
         out = self.classifier(out)
 
         return out
