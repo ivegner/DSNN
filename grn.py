@@ -3,40 +3,30 @@ from torch import nn
 from torch.nn.init import kaiming_uniform_, xavier_uniform_, normal
 import torch.nn.functional as F
 
-from grn_functions import (
-    ConvFilterGenerator,
-    MatrixMessagePassing,
-    VectorMessagePassing,
-    GRUUpdate,
-    linear,
-)
+from grn_functions import MatrixMessagePassing, GRUUpdate, linear
 
 from modules import TextAttnModule, ImageAttnModule
 
+# INIT_MASK_FRAC = 0.8
+
 
 class GRN(nn.Module):
-    def __init__(self, n_neurons, state_dim, edge_dim=32, message_dim=32, matrix_messages=True):
+    def __init__(self, n_neurons, state_dim):
         super().__init__()
-        self.filter_gen = ConvFilterGenerator(
-            n_neurons, state_dim, edge_dim, message_dim=message_dim, use_matrix_filters=matrix_messages
-        )
-
-        if matrix_messages:
-            self.message_passing = MatrixMessagePassing(state_dim, message_dim)
-        else:
-            self.message_passing = VectorMessagePassing()
-            message_dim=state_dim # message is a transformed state
-        self.update = GRUUpdate(state_dim, message_dim)
-
+        # self.filter_gen = ConvFilterGenerator(
+        #     n_neurons, state_dim, edge_dim, message_dim=message_dim, use_matrix_filters=matrix_messages
+        # )
+        self.message_passing = MatrixMessagePassing(state_dim, n_neurons)
+        self.update = GRUUpdate(state_dim)
         # learned edges
-        self.edge_matrix = nn.Parameter(
-            kaiming_uniform_(torch.empty((n_neurons, n_neurons, edge_dim)))
+        self.adjacency = nn.Parameter(
+            nn.init.uniform_(torch.empty((n_neurons, n_neurons)), -1., 1.)
         )
+        # self.adjacency = nn.Parameter(torch._cast_Float(torch.FloatTensor(n_neurons, n_neurons).uniform_() > INIT_MASK_FRAC))
 
         self.initial_state = nn.Parameter(torch.ones(n_neurons, state_dim) / n_neurons)
         self.n_neurons = n_neurons
         self.state_dim = state_dim
-        self.message_dim = message_dim
 
         # set in init for each training example
         self.n_outputs = None
@@ -53,7 +43,6 @@ class GRN(nn.Module):
         # set initial hidden states
         self.hidden_states = self.initial_state.repeat(batch_size, 1, 1)
         # make edge filters
-        self.filters = self.filter_gen(self.hidden_states, self.edge_matrix)
         self.n_outputs = n_outputs
 
         # just the start values as outputs
@@ -86,13 +75,12 @@ class GRN(nn.Module):
         """
         n_inputs = inputs.size(1)
         input_indices = torch.tensor(range(n_inputs))
-        self.filters = self.filter_gen(self.hidden_states, self.edge_matrix)
 
         # put the inputs in their respective neurons
         self.hidden_states[:, input_indices, :] += inputs[:, input_indices, :]
 
         # perform message passing
-        messages = self.message_passing(self.hidden_states, self.filters)
+        messages = self.message_passing(self.hidden_states, self.adjacency)
         self.hidden_states = self.update(self.hidden_states, messages)
 
         # size of outputs: [n_outputs, batch_size, state_dim]
@@ -111,10 +99,7 @@ class GRNModel(nn.Module):
         classes=28,
         image_feature_dim=512,
         text_feature_dim=512,
-        message_dim=128,
-        edge_dim=5,
         save_states=False,
-        matrix_messages=True,
     ):
         super().__init__()
 
@@ -133,28 +118,22 @@ class GRNModel(nn.Module):
             ]
         )
 
-        self.grn = GRN(
-            n_neurons,
-            state_dim,
-            edge_dim=edge_dim,
-            message_dim=message_dim,
-            matrix_messages=matrix_messages,
-        )
+        self.grn = GRN(n_neurons, state_dim)
 
         self.classifier = nn.Sequential(
             linear(state_dim + text_feature_dim * 2, state_dim),
             nn.ELU(),
             linear(state_dim, classes),
         )
-        for param in self.classifier.parameters():
-            param.requires_grad = False
+        # for param in self.classifier.parameters():
+        #     param.requires_grad = False
 
         kaiming_uniform_(self.classifier[0].weight)
 
         self.max_step = max_step
         self.state_dim = state_dim
         self.batch_size = batch_size
-
+        self.n_neurons = n_neurons
         self.image_feature_dim = image_feature_dim
         self.text_feature_dim = text_feature_dim
 

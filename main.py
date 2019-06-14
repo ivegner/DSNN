@@ -29,6 +29,7 @@ device = (
     torch.device("cpu") if DEBUG else torch.device("cuda" if torch.cuda.is_available() else "cpu")
 )
 
+L2_COEFF = 0.0
 
 def train(net, optimizer, criterion, clevr_dir, epoch):
     clevr = CLEVR(clevr_dir, transform=transform)
@@ -46,31 +47,31 @@ def train(net, optimizer, criterion, clevr_dir, epoch):
 
     net.train(True)
     for name, param in net.named_parameters():
-        if "grn" not in name and epoch < 1:
+        if epoch < 1 and "classifier" in name:
             param.requires_grad = False
-        elif epoch < 3 and "classifier" in name:
-            param.requires_grad = False
-        else:
+        elif "eye" not in name:
             param.requires_grad = True
     for i, (image, question, q_len, answer, _) in enumerate(pbar):
         image, question, answer = (image.to(device), question.to(device), answer.to(device))
 
+        m = net.module if isinstance(net, nn.DataParallel) else net
+
         net.zero_grad()
         output = net(image, question, q_len)
         loss = criterion(output, answer)
+        loss += torch.abs(m.grn.adjacency).sum(1).mean(0) * L2_COEFF
         loss.backward()
 
         # if wrapped in a DataParallel, the actual net is at DataParallel.module
-        m = net.module if isinstance(net, nn.DataParallel) else net
         # torch.nn.utils.clip_grad_norm_(m.parameters(), 1)
-        torch.nn.utils.clip_grad_value_(net.parameters(), 5)
+        # torch.nn.utils.clip_grad_value_(net.parameters(), 5)
         # print("GRADS", dict(net.named_parameters())["module.grn.filter_gen.filter_gen_fc.0.weight"].grad)
-        if i % 1000 == 0:
-            with torch.no_grad():
-                visualize(net.module, clevr_dir, batch_size)
-                plot_grad_flow(net.named_parameters())
-                net.train(True)
-                net.module.save_states = False
+        # if i % 1000 == 0:
+        #     with torch.no_grad():
+        #         visualize(net.module, clevr_dir, batch_size)
+        #         plot_grad_flow(net.named_parameters())
+        #         net.train(True)
+        #         net.module.save_states = False
 
         optimizer.step()
         correct = output.detach().argmax(1) == answer
@@ -204,9 +205,6 @@ def main(
         hidden_dim,
         image_feature_dim=512,
         text_feature_dim=512,
-        message_dim=message_dim,
-        edge_dim=5,
-        # matrix_messages=False
     )
     net = net.to(device)
     print(net)
