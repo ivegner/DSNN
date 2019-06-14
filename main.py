@@ -1,3 +1,9 @@
+DEBUG = False
+if DEBUG:
+    import multiprocessing
+
+    multiprocessing.set_start_method("spawn", True)
+
 import sys
 import os
 import pickle
@@ -5,68 +11,47 @@ from collections import Counter
 
 import numpy as np
 import torch
+
+torch.manual_seed(2)
 from torch import nn
 from torch import optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import click
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 
 from dataset import CLEVR, collate_data, transform
 from grn import GRNModel
+from visualize import visualize, plot_grad_flow
 
 batch_size = 64
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def plot_grad_flow(named_parameters):
-    """Plots the gradients flowing through different layers in the net during training.
-    Can be used for checking for possible gradient vanishing / exploding problems.
-
-    Usage: Plug this function in Trainer class after loss.backwards() as
-    "plot_grad_flow(self.model.named_parameters())" to visualize the gradient flow"""
-    ave_grads = []
-    max_grads = []
-    layers = []
-    for n, p in named_parameters:
-        if (p.requires_grad) and ("bias" not in n):
-            layers.append(n)
-            ave_grads.append(p.grad.abs().mean())
-            max_grads.append(p.grad.abs().max())
-    plt.bar(np.arange(len(max_grads)), max_grads, alpha=0.5, lw=1, color="c")
-    plt.bar(np.arange(len(max_grads)), ave_grads, alpha=0.5, lw=1, color="b")
-    plt.hlines(0, 0, len(ave_grads) + 1, lw=2, color="k")
-    plt.xticks(range(0, len(ave_grads), 1), layers, rotation="vertical")
-    plt.xlim(left=0, right=len(ave_grads))
-    plt.ylim(
-        bottom=-0.001, top=np.quantile(torch.tensor(max_grads).cpu(), 0.75)
-    )  # zoom in on the lower gradient regions
-    plt.xlabel("Layers")
-    plt.ylabel("average gradient")
-    plt.title("Gradient flow")
-    plt.grid(True)
-    plt.legend(
-        [
-            Line2D([0], [0], color="c", lw=4),
-            Line2D([0], [0], color="b", lw=4),
-            Line2D([0], [0], color="k", lw=4),
-        ],
-        ["max-gradient", "mean-gradient", "zero-gradient"],
-    )
-    plt.show()
+device = (
+    torch.device("cpu") if DEBUG else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+)
 
 
 def train(net, optimizer, criterion, clevr_dir, epoch):
     clevr = CLEVR(clevr_dir, transform=transform)
-    train_set = DataLoader(clevr, batch_size=batch_size, num_workers=4, collate_fn=collate_data)
+    train_set = DataLoader(
+        clevr,
+        batch_size=batch_size,
+        num_workers=0 if DEBUG else 4,
+        collate_fn=collate_data,
+        shuffle=True,
+    )
 
     dataset = iter(train_set)
     pbar = tqdm(dataset)
     moving_loss = 0
 
     net.train(True)
+    for name, param in net.named_parameters():
+        if "grn" not in name and epoch < 1:
+            param.requires_grad = False
+        elif epoch < 3 and "classifier" in name:
+            param.requires_grad = False
+        else:
+            param.requires_grad = True
     for i, (image, question, q_len, answer, _) in enumerate(pbar):
         image, question, answer = (image.to(device), question.to(device), answer.to(device))
 
@@ -76,12 +61,16 @@ def train(net, optimizer, criterion, clevr_dir, epoch):
         loss.backward()
 
         # if wrapped in a DataParallel, the actual net is at DataParallel.module
-        # m = net.module if isinstance(net, nn.DataParallel) else net
+        m = net.module if isinstance(net, nn.DataParallel) else net
         # torch.nn.utils.clip_grad_norm_(m.parameters(), 1)
-        # torch.nn.utils.clip_grad_value_(net.parameters(), 0.05)
+        torch.nn.utils.clip_grad_value_(net.parameters(), 5)
         # print("GRADS", dict(net.named_parameters())["module.grn.filter_gen.filter_gen_fc.0.weight"].grad)
-        # if i % 100 == 0:
-        #     plot_grad_flow(net.named_parameters())
+        if i % 1000 == 0:
+            with torch.no_grad():
+                visualize(net.module, clevr_dir, batch_size)
+                plot_grad_flow(net.named_parameters())
+                net.train(True)
+                net.module.save_states = False
 
         optimizer.step()
         correct = output.detach().argmax(1) == answer
@@ -94,7 +83,7 @@ def train(net, optimizer, criterion, clevr_dir, epoch):
             moving_loss = moving_loss * 0.99 + correct * 0.01
 
         pbar.set_description(
-            "Epoch: {}; Loss: {:.5f}; Acc: {:.5f}".format(epoch + 1, loss.item(), moving_loss)
+            "Epoch: {}; Loss: {:.5f}; Acc: {:.5f}".format(epoch, loss.item(), moving_loss)
         )
 
     clevr.close()
@@ -181,9 +170,27 @@ def test(net, clevr_dir):
     default=False,
     is_flag=True,
     show_default=True,
-    help="Do not train. Only run tests and export results for visualization.",
+    help="Do not train. Only run tests.",
 )
-def main(clevr_dir, n_neurons, hidden_dim=512, load_filename=None, n_epochs=20, only_test=False):
+@click.option(
+    "--vis",
+    "--only-visualize",
+    "only_visualize",
+    default=False,
+    is_flag=True,
+    show_default=True,
+    help="Do not train. Only do visualization.",
+)
+def main(
+    clevr_dir,
+    n_neurons,
+    hidden_dim=512,
+    load_filename=None,
+    n_epochs=20,
+    only_test=False,
+    only_visualize=False,
+):
+    do_train = not (only_test or only_visualize)
     with open(os.path.join(clevr_dir, "preprocessed/dic.pkl"), "rb") as f:
         dic = pickle.load(f)
 
@@ -194,8 +201,8 @@ def main(clevr_dir, n_neurons, hidden_dim=512, load_filename=None, n_epochs=20, 
         n_words,
         n_neurons,
         hidden_dim,
-        image_feature_dim=hidden_dim,
-        text_feature_dim=hidden_dim,
+        image_feature_dim=512,
+        text_feature_dim=512,
         message_dim=hidden_dim,
         edge_dim=5,
     )
@@ -205,27 +212,27 @@ def main(clevr_dir, n_neurons, hidden_dim=512, load_filename=None, n_epochs=20, 
     optimizer = optim.Adam(net.parameters(), lr=1e-4)
     start_epoch = 0
 
-    if device.type == "cuda":
-        devices = [0] if only_test else None
-        print("Using", torch.cuda.device_count(), "GPUs!")
-        net = nn.DataParallel(net, device_ids=devices)
-
     if load_filename:
         checkpoint = torch.load(load_filename)
         # new format
         net.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        start_epoch = checkpoint["epoch"]
+        start_epoch = checkpoint["epoch"] + 1
         print(f"Starting at epoch {start_epoch}")
 
-    if not only_test:
+    if device.type == "cuda" and not only_visualize:
+        print("Using", torch.cuda.device_count(), "GPUs!")
+        net = nn.DataParallel(net)
+
+    if do_train:
         # do training and validation
         for epoch in range(start_epoch, n_epochs):
             train(net, optimizer, criterion, clevr_dir, epoch)
             valid(net, clevr_dir, epoch)
 
             with open(
-                f"checkpoint/checkpoint_{str(epoch + 1).zfill(2)}_{n_neurons}m_{hidden_dim}h.model", "wb"
+                f"checkpoint/checkpoint_{str(epoch).zfill(2)}_{n_neurons}n_{hidden_dim}h.model",
+                "wb",
             ) as f:
 
                 torch.save(
@@ -240,7 +247,10 @@ def main(clevr_dir, n_neurons, hidden_dim=512, load_filename=None, n_epochs=20, 
                 )
     else:
         # predict on the test set and make visualization data
-        test(net, clevr_dir, batch_size=batch_size)
+        if only_test:
+            test(net, clevr_dir, batch_size=batch_size)
+        if only_visualize:
+            visualize(net, clevr_dir, batch_size=batch_size)
 
 
 if __name__ == "__main__":

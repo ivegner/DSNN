@@ -34,7 +34,7 @@ class ConvFilterGenerator(nn.Module):
         out_flat_dim = state_dim * message_dim if use_matrix_filters else state_dim
         # "smooth" interpolation of neurons
         hidden_layer_units = np.linspace(
-            start=edge_dim, stop=out_flat_dim, num=n_filter_nn_layers + 2, dtype=int
+            start=state_dim + edge_dim, stop=out_flat_dim, num=n_filter_nn_layers + 2, dtype=int
         ).tolist()
 
         # assemble layers
@@ -46,7 +46,7 @@ class ConvFilterGenerator(nn.Module):
 
         self.filter_gen_fc = nn.Sequential(*layers)
 
-    def forward(self, edge_matrix):
+    def forward(self, hidden_states, edge_matrix):
         """Forward pass of filter generator.
         :param edge_matrix: edge matrix shaped [n_neurons, n_neurons, edge_dim]
         :return: generated message transformations. If self.use_matrix_filters is True, the shape is
@@ -54,15 +54,23 @@ class ConvFilterGenerator(nn.Module):
             else we have a vector for each neuron pair: [n_neurons, n_neurons, state_dim]
         """
         # NO BATCHING BECAUSE WE USE THE SAME MATRICES FOR EVERY SAMPLE IN THE ENTIRE BATCH
-        edge_mat_flat = edge_matrix.view(-1, self.edge_dim)
-        message_matrices = self.filter_gen_fc.forward(edge_mat_flat)
+        batch_size = hidden_states.size(0)
+        concat = torch.cat(
+            [
+                edge_matrix.expand((batch_size, -1, -1, -1)),
+                hidden_states.unsqueeze(2).expand((-1, -1, self.n_neurons, -1)),
+            ],
+            dim=-1,
+        )
+        concat_flat = concat.view(-1, (self.edge_dim + self.state_dim))
+        message_matrices = self.filter_gen_fc(concat_flat)
         if self.use_matrix_filters:
             message_matrices = message_matrices.view(
-                [self.n_neurons, self.n_neurons, self.message_dim, self.state_dim]
+                [batch_size, self.n_neurons, self.n_neurons, self.message_dim, self.state_dim]
             )
         else:
             message_matrices = message_matrices.view(
-                [self.n_neurons, self.n_neurons, self.state_dim]
+                [batch_size, self.n_neurons, self.n_neurons, self.state_dim]
             )
 
         return message_matrices
@@ -94,9 +102,9 @@ class MatrixMessagePassing(nn.Module):
         # multiply matrix with hidden states and add bias to generate messages
         hidden_states_flat = hidden_states.view([batch_size, n_neurons * self.state_dim, 1])
 
-        matrix_filters = matrix_filters.permute([0, 2, 1, 3])
+        matrix_filters = matrix_filters.permute([0, 1, 3, 2, 4])
         matrix_filters = matrix_filters.contiguous().view(
-            [n_neurons * self.message_dim, n_neurons * self.state_dim]
+            [batch_size, n_neurons * self.message_dim, n_neurons * self.state_dim]
         )
 
         # (1, n*m_d, n*d) x (b, n*d, 1) -> (b, n*m_d, 1)
@@ -130,7 +138,7 @@ class VectorMessagePassing(nn.Module):
 
 def linear(in_dim, out_dim, bias=True):
     lin = nn.Linear(in_dim, out_dim, bias=bias)
-    xavier_uniform_(lin.weight)
+    kaiming_uniform_(lin.weight)
     if bias:
         lin.bias.data.zero_()
 

@@ -29,23 +29,30 @@ class GRN(nn.Module):
 
         # learned edges
         self.edge_matrix = nn.Parameter(
-            xavier_uniform_(torch.empty((n_neurons, n_neurons, edge_dim)))
+            kaiming_uniform_(torch.empty((n_neurons, n_neurons, edge_dim)))
         )
 
-        self.initial_state = nn.Parameter(torch.zeros((n_neurons, state_dim)))
+        self.initial_state = nn.Parameter(torch.ones(n_neurons, state_dim)/n_neurons)
         self.n_neurons = n_neurons
         self.state_dim = state_dim
+        self.message_dim = message_dim
 
         # set in init for each training example
         self.n_outputs = None
         self.hidden_states = None
         self.filters = None
 
+        # self.filters = nn.Parameter(
+        #     kaiming_uniform_(
+        #         torch.empty((self.n_neurons, self.n_neurons, self.state_dim, self.message_dim))
+        #     )
+        # )
+
     def init(self, batch_size, n_outputs):
         # set initial hidden states
         self.hidden_states = self.initial_state.repeat(batch_size, 1, 1)
         # make edge filters
-        self.filters = self.filter_gen.forward(self.edge_matrix)
+        self.filters = self.filter_gen(self.hidden_states, self.edge_matrix)
         self.n_outputs = n_outputs
 
         # just the start values as outputs
@@ -78,13 +85,14 @@ class GRN(nn.Module):
         """
         n_inputs = inputs.size(1)
         input_indices = torch.tensor(range(n_inputs))
+        self.filters = self.filter_gen(self.hidden_states, self.edge_matrix)
 
         # put the inputs in their respective neurons
-        self.hidden_states[:, input_indices, :] = inputs[:, input_indices, :]
+        self.hidden_states[:, input_indices, :] += inputs[:, input_indices, :]
 
         # perform message passing
-        messages = self.message_passing.forward(self.hidden_states, self.filters)
-        self.hidden_states = self.update.forward(self.hidden_states, messages)
+        messages = self.message_passing(self.hidden_states, self.filters)
+        self.hidden_states = self.update(self.hidden_states, messages)
 
         # size of outputs: [n_outputs, batch_size, state_dim]
         return self._get_outputs(), self.hidden_states
@@ -103,7 +111,8 @@ class GRNModel(nn.Module):
         image_feature_dim=512,
         text_feature_dim=512,
         message_dim=128,
-        edge_dim=5
+        edge_dim=5,
+        save_states=False,
     ):
         super().__init__()
 
@@ -122,11 +131,18 @@ class GRNModel(nn.Module):
             ]
         )
 
-        self.grn = GRN(n_neurons, state_dim, edge_dim=5, message_dim=message_dim, matrix_messages=True)
+        self.grn = GRN(
+            n_neurons, state_dim, edge_dim=edge_dim, message_dim=message_dim, matrix_messages=True
+        )
 
         self.classifier = nn.Sequential(
-            linear(state_dim + text_feature_dim*2, state_dim), nn.ELU(), linear(state_dim, classes)
+            linear(state_dim + text_feature_dim * 2, state_dim),
+            nn.ELU(),
+            linear(state_dim, classes),
         )
+        for param in self.classifier.parameters():
+            param.requires_grad = False
+
         kaiming_uniform_(self.classifier[0].weight)
 
         self.max_step = max_step
@@ -136,10 +152,15 @@ class GRNModel(nn.Module):
         self.image_feature_dim = image_feature_dim
         self.text_feature_dim = text_feature_dim
 
+        self.save_states = save_states
+
     def forward(self, image, question, question_len, dropout=0.15):
         batch_size = question.size(0)
         self.submodules["image_attn"].set_input(image)
         self.submodules["text_attn"].set_input((question, question_len))
+
+        if self.save_states:
+            saved_states = {"submodules": [], "grn": []}
 
         n_grn_outputs = len(self.submodules) + 1  # 1 for final output
         # size = [n_outputs, batch_size, dim]
@@ -148,14 +169,20 @@ class GRNModel(nn.Module):
         for step in range(self.max_step):
             in_out = zip(self.submodules.values(), grn_outputs)
             # outputs for each submodule = inputs to grn
-            submodule_outputs = torch.stack([m(x) for (m, x) in in_out], 0).permute(1,0,2)
+            submodule_outputs = torch.stack([m(x) for (m, x) in in_out], 0).permute(1, 0, 2)
             # Run GRN
-            _grn_out, _ = self.grn(submodule_outputs)
+            _grn_out, _grn_hidden_states = self.grn(submodule_outputs)
             grn_outputs, final_out = _grn_out[:-1], _grn_out[-1]
+            if self.save_states:
+                saved_states["submodules"].append(submodule_outputs)
+                saved_states["grn"].append(_grn_hidden_states)
 
         # Read out output
         hidden_state = self.submodules["text_attn"].input[1]
         out = torch.cat([final_out, hidden_state], 1)
         out = self.classifier(out)
 
-        return out
+        if self.save_states:
+            return out, saved_states
+        else:
+            return out

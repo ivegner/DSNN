@@ -4,12 +4,6 @@ import torch.nn.functional as F
 from grn_functions import linear
 
 
-class GRNModule(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.input = None
-        self.output = None
-
 
 class ImageAttnModule(nn.Module):
     def __init__(self, state_dim, image_feature_dim=512):
