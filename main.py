@@ -185,6 +185,7 @@ def main(
     clevr_dir,
     n_neurons,
     hidden_dim=512,
+    message_dim=32,
     load_filename=None,
     n_epochs=20,
     only_test=False,
@@ -203,8 +204,9 @@ def main(
         hidden_dim,
         image_feature_dim=512,
         text_feature_dim=512,
-        message_dim=hidden_dim,
+        message_dim=message_dim,
         edge_dim=5,
+        # matrix_messages=False
     )
     net = net.to(device)
     print(net)

@@ -18,13 +18,14 @@ class GRN(nn.Module):
     def __init__(self, n_neurons, state_dim, edge_dim=32, message_dim=32, matrix_messages=True):
         super().__init__()
         self.filter_gen = ConvFilterGenerator(
-            n_neurons, state_dim, edge_dim, message_dim=message_dim, use_matrix_filters=True
+            n_neurons, state_dim, edge_dim, message_dim=message_dim, use_matrix_filters=matrix_messages
         )
 
         if matrix_messages:
             self.message_passing = MatrixMessagePassing(state_dim, message_dim)
         else:
             self.message_passing = VectorMessagePassing()
+            message_dim=state_dim # message is a transformed state
         self.update = GRUUpdate(state_dim, message_dim)
 
         # learned edges
@@ -32,7 +33,7 @@ class GRN(nn.Module):
             kaiming_uniform_(torch.empty((n_neurons, n_neurons, edge_dim)))
         )
 
-        self.initial_state = nn.Parameter(torch.ones(n_neurons, state_dim)/n_neurons)
+        self.initial_state = nn.Parameter(torch.ones(n_neurons, state_dim) / n_neurons)
         self.n_neurons = n_neurons
         self.state_dim = state_dim
         self.message_dim = message_dim
@@ -113,6 +114,7 @@ class GRNModel(nn.Module):
         message_dim=128,
         edge_dim=5,
         save_states=False,
+        matrix_messages=True,
     ):
         super().__init__()
 
@@ -132,7 +134,11 @@ class GRNModel(nn.Module):
         )
 
         self.grn = GRN(
-            n_neurons, state_dim, edge_dim=edge_dim, message_dim=message_dim, matrix_messages=True
+            n_neurons,
+            state_dim,
+            edge_dim=edge_dim,
+            message_dim=message_dim,
+            matrix_messages=matrix_messages,
         )
 
         self.classifier = nn.Sequential(

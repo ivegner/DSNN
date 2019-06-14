@@ -124,7 +124,8 @@ class VectorMessagePassing(nn.Module):
     def forward(self, hidden_states, vector_transforms):
         """Forward pass for generating messages using vector filters.
         :param hidden_states: Hidden states of all neurons, shaped [batch_size, n_neurons, state_dim]
-        :param vector_transforms: generated message transforms shaped [batch_size, n_neurons, n_neurons, state_dim]
+        :param vector_transforms: generated message transforms shaped
+            [batch_size, n_neurons, n_neurons, state_dim]
         :return: sum of incoming messages to each neuron, shaped [batch_size, n_neurons, state_dim]
         """
         hidden_states = torch.unsqueeze(hidden_states, 1)
