@@ -3,7 +3,7 @@
 ## Explanation
 Pending
 
-## Check out `graph` branch for Graph Convolutional implementation.
+### Check out `graph` branch for Graph Convolutional implementation.
 ## TODO:
 
 ### Algorithm
